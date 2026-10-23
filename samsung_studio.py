@@ -434,13 +434,21 @@ class SamsungStudioWindow(QMainWindow):
         res_row.addWidget(self.combo_quality, 1)
         left_layout.addLayout(res_row)
 
-        # 启动投屏主按钮
+        # 启动投屏主按钮与固定展示按钮
         self.btn_start_mirror = QPushButton("🚀 立即启动手机投屏")
         self.btn_start_mirror.setObjectName("PrimaryButton")
-        self.btn_start_mirror.setMinimumHeight(46)
+        self.btn_start_mirror.setMinimumHeight(44)
         self.btn_start_mirror.setCursor(Qt.PointingHandCursor)
-        self.btn_start_mirror.clicked.connect(self.launch_scrcpy)
+        self.btn_start_mirror.clicked.connect(lambda: self.launch_scrcpy(pinned_mode=False))
         left_layout.addWidget(self.btn_start_mirror)
+
+        self.is_mirror_pinned = False
+        self.btn_pin_mirror = QPushButton("📌 固定展示投屏 (置顶停靠桌面右侧)")
+        self.btn_pin_mirror.setObjectName("PinButton")
+        self.btn_pin_mirror.setMinimumHeight(40)
+        self.btn_pin_mirror.setCursor(Qt.PointingHandCursor)
+        self.btn_pin_mirror.clicked.connect(self.toggle_pin_mirror_window)
+        left_layout.addWidget(self.btn_pin_mirror)
 
         # 分割线
         line1 = QFrame()
@@ -688,6 +696,28 @@ class SamsungStudioWindow(QMainWindow):
             }
             QPushButton#AccentButton:hover {
                 background-color: #047857;
+            }
+            QPushButton#PinButton {
+                background-color: #7C3AED;
+                border: 1px solid #6D28D9;
+                color: #FFFFFF;
+                font-size: 13px;
+                font-weight: bold;
+                border-radius: 8px;
+            }
+            QPushButton#PinButton:hover {
+                background-color: #6D28D9;
+            }
+            QPushButton#PinButtonActive {
+                background-color: #EA580C;
+                border: 1px solid #C2410C;
+                color: #FFFFFF;
+                font-size: 13px;
+                font-weight: bold;
+                border-radius: 8px;
+            }
+            QPushButton#PinButtonActive:hover {
+                background-color: #C2410C;
             }
             QComboBox, QLineEdit {
                 border: 1px solid #CBD5E1;
@@ -987,7 +1017,82 @@ class SamsungStudioWindow(QMainWindow):
         self.update_selection_count()
 
     # ================= 投屏与手机快捷操作 =================
-    def launch_scrcpy(self):
+    def _find_scrcpy_hwnd(self):
+        """查找当前正在运行的 Samsung 实时投屏窗口句柄"""
+        if sys.platform != "win32":
+            return 0
+        import ctypes
+        user32 = ctypes.windll.user32
+        if self.current_serial:
+            title = f"Samsung 实时投屏 ({self.current_serial})"
+            hwnd = user32.FindWindowW(None, title)
+            if hwnd:
+                return hwnd
+        # 枚举模糊匹配标题包含 'Samsung 实时投屏' 的窗口
+        found_hwnd = [0]
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        def _enum_cb(hwnd, _lparam):
+            if user32.IsWindowVisible(hwnd):
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length > 0:
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buf, length + 1)
+                    if "Samsung 实时投屏" in buf.value:
+                        found_hwnd[0] = hwnd
+                        return False
+            return True
+        user32.EnumWindows(WNDENUMPROC(_enum_cb), 0)
+        return found_hwnd[0]
+
+    def _update_pin_button_ui(self, pinned: bool):
+        self.is_mirror_pinned = pinned
+        self.chk_always_on_top.blockSignals(True)
+        self.chk_always_on_top.setChecked(pinned)
+        self.chk_always_on_top.blockSignals(False)
+        if pinned:
+            self.btn_pin_mirror.setText("📌 已固定置顶展示 (点击解除固定)")
+            self.btn_pin_mirror.setObjectName("PinButtonActive")
+        else:
+            self.btn_pin_mirror.setText("📌 固定展示投屏 (置顶停靠桌面右侧)")
+            self.btn_pin_mirror.setObjectName("PinButton")
+        self.btn_pin_mirror.style().unpolish(self.btn_pin_mirror)
+        self.btn_pin_mirror.style().polish(self.btn_pin_mirror)
+
+    def toggle_pin_mirror_window(self):
+        """一键固定展示投屏窗口（若未启动则直接以置顶+停靠屏幕右侧启动；若已启动则实时切换置顶与停靠状态）"""
+        hwnd = self._find_scrcpy_hwnd()
+        if not hwnd or (self.scrcpy_proc and self.scrcpy_proc.poll() is not None):
+            # 投屏未运行，直接以固定置顶+停靠右侧模式启动
+            self._update_pin_button_ui(True)
+            self.launch_scrcpy(pinned_mode=True)
+            return
+
+        import ctypes
+        user32 = ctypes.windll.user32
+        HWND_TOPMOST = -1
+        HWND_NOTOPMOST = -2
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_SHOWWINDOW = 0x0040
+
+        if not self.is_mirror_pinned:
+            # 切换为固定展示：置顶并自动停靠到屏幕右侧
+            screen_geo = QApplication.primaryScreen().availableGeometry()
+            win_w = 400
+            win_h = min(860, screen_geo.height() - 60)
+            target_x = max(0, screen_geo.width() - win_w - 24)
+            target_y = max(30, (screen_geo.height() - win_h) // 2)
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, target_x, target_y, win_w, win_h, SWP_SHOWWINDOW)
+            self._update_pin_button_ui(True)
+            self.progress_bar.setFormat("📌 投屏窗口已固定在桌面最前端（右侧停靠展示），切换其他软件也不会被遮挡")
+        else:
+            # 解除固定置顶
+            user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+            self._update_pin_button_ui(False)
+            self.progress_bar.setFormat("🔓 已解除投屏窗口固定置顶状态")
+
+    def launch_scrcpy(self, pinned_mode: bool = False):
         if not self.current_serial:
             self.refresh_device_and_gallery()
             if not self.current_serial:
@@ -997,6 +1102,14 @@ class SamsungStudioWindow(QMainWindow):
         if not SCRCPY_EXE.exists():
             QMessageBox.critical(self, "组件缺失", f"未找到投屏引擎: {SCRCPY_EXE}")
             return
+
+        # 如果已有投屏窗口运行，避免重复开多个导致冲突
+        if self.scrcpy_proc and self.scrcpy_proc.poll() is None:
+            try:
+                self.scrcpy_proc.terminate()
+                self.scrcpy_proc.wait(timeout=2)
+            except Exception:
+                pass
 
         # 启动投屏前暂停后台缩略图拉取，避免并发占用 USB 集线器带宽导致投屏断连
         if self.thumb_worker and self.thumb_worker.isRunning():
@@ -1023,8 +1136,24 @@ class SamsungStudioWindow(QMainWindow):
             cmd.append("--stay-awake")
         if self.chk_turn_screen_off.isChecked():
             cmd.append("--turn-screen-off")
-        if self.chk_always_on_top.isChecked():
+
+        if pinned_mode or self.chk_always_on_top.isChecked():
             cmd.append("--always-on-top")
+            screen_geo = QApplication.primaryScreen().availableGeometry()
+            win_w = 400
+            win_h = min(860, screen_geo.height() - 60)
+            target_x = max(0, screen_geo.width() - win_w - 24)
+            target_y = max(30, (screen_geo.height() - win_h) // 2)
+            cmd.extend([
+                f"--window-x={target_x}",
+                f"--window-y={target_y}",
+                f"--window-width={win_w}",
+                f"--window-height={win_h}",
+            ])
+            self._update_pin_button_ui(True)
+        else:
+            self._update_pin_button_ui(False)
+
         if self.chk_enable_audio.isChecked():
             cmd.append("--audio-codec=aac")
         else:
@@ -1040,7 +1169,10 @@ class SamsungStudioWindow(QMainWindow):
                 env=env,
                 creationflags=CREATION_FLAGS,
             )
-            self.progress_bar.setFormat("🚀 高清投屏窗口已启动！您可以在独立窗口中直接用鼠标和键盘操控三星手机")
+            if pinned_mode or self.is_mirror_pinned:
+                self.progress_bar.setFormat("📌 固定展示投屏已启动！窗口已置顶停靠在桌面右侧，永不被其他窗口遮挡")
+            else:
+                self.progress_bar.setFormat("🚀 高清投屏窗口已启动！您可以在独立窗口中直接用鼠标和键盘操控三星手机")
         except Exception as e:
             QMessageBox.critical(self, "启动投屏失败", f"无法启动 scrcpy 投屏:\n{e}")
 
