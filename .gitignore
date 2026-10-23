@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+cache_thumbs/
+scrcpy/
+adb_v35.exe
+*.zip
